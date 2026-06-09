@@ -17,6 +17,9 @@ namespace Mcp.Functions
         };
 
         private static Coroutine activeJogRoutine;
+        private const double GripperClosedRad = 0.0d;
+        private const double GripperOpenRad = 0.93d;
+        private const string GripperCommandTopic = "/ag145/forward_position_controller/commands";
 
         public static Task<object> Handle(JObject parameters)
         {
@@ -29,6 +32,8 @@ namespace Mcp.Functions
                     "jog_arm" => JogArm(parameters),
                     "jogging" => Jogging(parameters),
                     "stop_jog" => StopJog(),
+                    "grip" => SetGripperClosed(),
+                    "ungrip" => SetGripperOpen(),
                     "set_gripper" => SetGripper(parameters),
                     "get_robot_state" => GetRobotState(),
                     _ => throw new InvalidOperationException($"Unknown robot action '{action}'.")
@@ -141,11 +146,66 @@ namespace Mcp.Functions
                 }
 
                 openPercent = Math.Max(0d, Math.Min(100d, openPercent));
-                position = 0.93d - (openPercent / 100d) * 0.93d;
+                position = GripperClosedRad + (openPercent / 100d) * (GripperOpenRad - GripperClosedRad);
             }
 
+            position = Math.Max(GripperClosedRad, Math.Min(GripperOpenRad, position));
             subscriber.ApplyMcpGripperPosition(position);
-            return new { message = "AG145 gripper preview updated.", position_rad = position };
+            bool published = PublishGripperCommand(subscriber, position);
+            return new
+            {
+                message = published
+                    ? "AG145 gripper preview updated and ROS command published."
+                    : "AG145 gripper preview updated, but ROS command was not published.",
+                topic = GripperCommandTopic,
+                position_rad = position,
+                ros_published = published
+            };
+        }
+
+        private static object SetGripperClosed()
+        {
+            return SetGripperPosition(GripperClosedRad, "AG145 grip/close command.");
+        }
+
+        private static object SetGripperOpen()
+        {
+            return SetGripperPosition(GripperOpenRad, "AG145 ungrip/open command.");
+        }
+
+        private static object SetGripperPosition(double positionRad, string message)
+        {
+            Ag145RosJointSubscriber subscriber = UnityEngine.Object.FindObjectOfType<Ag145RosJointSubscriber>();
+            if (subscriber == null)
+            {
+                throw new InvalidOperationException("Ag145RosJointSubscriber was not found in the scene.");
+            }
+
+            subscriber.ApplyMcpGripperPosition(positionRad);
+            bool published = PublishGripperCommand(subscriber, positionRad);
+            return new
+            {
+                message = published ? $"{message} ROS command published." : $"{message} ROS command was not published.",
+                topic = GripperCommandTopic,
+                position_rad = positionRad,
+                ros_published = published
+            };
+        }
+
+        private static bool PublishGripperCommand(Ag145RosJointSubscriber subscriber, double positionRad)
+        {
+            Ag145GripperCommandPublisher publisher = UnityEngine.Object.FindObjectOfType<Ag145GripperCommandPublisher>();
+            if (publisher == null)
+            {
+                publisher = subscriber.GetComponent<Ag145GripperCommandPublisher>();
+                if (publisher == null)
+                {
+                    publisher = subscriber.gameObject.AddComponent<Ag145GripperCommandPublisher>();
+                }
+            }
+
+            publisher.Topic = GripperCommandTopic;
+            return publisher.PublishPosition(positionRad);
         }
 
         private static object GetRobotState()
